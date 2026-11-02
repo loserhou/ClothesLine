@@ -20,7 +20,8 @@
     </Window.Styles>
 
     <!-- StyleKit 铅笔手绘风（Sketch Style）晾衣收纳库 -->
-    <Border Background="#FAF7F2"
+    <Border Name="RootBorder"
+            Background="#FAF7F2"
             BorderBrush="#1E293B"
             BorderThickness="2"
             CornerRadius="8"
@@ -166,12 +167,29 @@
                                 </StackPanel>
 
                                 <StackPanel Spacing="4">
-                                    <TextBlock Text="源文件路径" FontSize="11" FontWeight="Bold" Foreground="#475569" />
-                                    <TextBlock Name="DetailFilePath"
-                                               Text="-"
-                                               FontSize="11"
-                                               Foreground="#64748B"
-                                               TextWrapping="Wrap" />
+                                    <Grid ColumnDefinitions="*,Auto">
+                                        <TextBlock Text="源文件路径" FontSize="11" FontWeight="Bold" Foreground="#475569" VerticalAlignment="Center" />
+                                        <Button Name="CopyPathButton"
+                                                Grid.Column="1"
+                                                Content="复制路径"
+                                                FontSize="11"
+                                                FontWeight="Bold"
+                                                Height="24"
+                                                Padding="8,0"
+                                                Background="#FFFDF9"
+                                                Foreground="#1E293B"
+                                                BorderBrush="#1E293B"
+                                                BorderThickness="1.2"
+                                                CornerRadius="4"
+                                                Cursor="Hand" />
+                                    </Grid>
+                                    <!-- 可直接选中复制 -->
+                                    <SelectableTextBlock Name="DetailFilePath"
+                                                         Text="-"
+                                                         FontSize="11"
+                                                         Foreground="#64748B"
+                                                         SelectionBrush="#FDE68A"
+                                                         TextWrapping="Wrap" />
                                 </StackPanel>
                             </StackPanel>
                         </ScrollViewer>

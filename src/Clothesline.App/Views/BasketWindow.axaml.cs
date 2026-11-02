@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
+using Clothesline.App.Services;
 using Clothesline.Core.Models;
 using Clothesline.Core.Storage;
 using Clothesline.Platform;
@@ -14,6 +15,7 @@ public partial class BasketWindow : Window
     private readonly IStateStore _stateStore;
     private readonly Action<RopeItem>? _onRehangCallback;
     private readonly Action? _onBasketChanged;
+    private readonly Func<IReadOnlyList<string>, string?, Task>? _onDropIn;
     private List<RopeItem> _items = [];
     private RopeItem? _selectedItem;
 
@@ -21,18 +23,36 @@ public partial class BasketWindow : Window
     {
     }
 
-    public BasketWindow(IStateStore stateStore, Action<RopeItem>? onRehangCallback, Action? onBasketChanged = null)
+    public BasketWindow(
+        IStateStore stateStore,
+        Action<RopeItem>? onRehangCallback,
+        Action? onBasketChanged = null,
+        Func<IReadOnlyList<string>, string?, Task>? onDropIn = null)
     {
         InitializeComponent();
         _stateStore = stateStore;
         _onRehangCallback = onRehangCallback;
         _onBasketChanged = onBasketChanged;
+        _onDropIn = onDropIn;
+
+        // 支持把晾衣绳上的卡片、或外部文件直接拖进打开的晾衣篮窗口
+        DragDrop.SetAllowDrop(this, true);
+        AddHandler(DragDrop.DragEnterEvent, OnDragOver);
+        AddHandler(DragDrop.DragOverEvent, OnDragOver);
+        AddHandler(DragDrop.DragLeaveEvent, (_, _) => SetDropHighlight(false));
+        AddHandler(DragDrop.DropEvent, OnDrop);
 
         HeaderBar.PointerPressed += OnHeaderPointerPressed;
         CloseButton.Click += (_, _) => Close();
         BottomCloseButton.Click += (_, _) => Close();
 
         RehangButton.Click += OnRehangClicked;
+        CopyPathButton.Click += async (_, _) =>
+        {
+            if (_selectedItem == null) return;
+            await CopyPathAsync(_selectedItem);
+            FlashButton(CopyPathButton, "已复制 ✓", "复制路径");
+        };
         LocateButton.Click += OnLocateClicked;
         OpenButton.Click += OnOpenClicked;
         DeleteFromBasketButton.Click += OnDeleteClicked;
@@ -52,6 +72,53 @@ public partial class BasketWindow : Window
     {
         base.OnOpened(e);
         await RefreshAsync();
+    }
+
+    private void OnDragOver(object? sender, DragEventArgs e)
+    {
+        bool hasFiles = DragDropHelper.MayContainFiles(e.Data);
+        e.DragEffects = hasFiles ? DragDropEffects.Move | DragDropEffects.Copy : DragDropEffects.None;
+        SetDropHighlight(hasFiles);
+        e.Handled = true;
+    }
+
+    private async void OnDrop(object? sender, DragEventArgs e)
+    {
+        SetDropHighlight(false);
+        e.Handled = true;
+
+        try
+        {
+            var paths = DragDropHelper.ExtractFilePaths(e.Data);
+            var cardId = DragDropHelper.TryGetCardId(e.Data);
+            if (paths.Count == 0) return;
+
+            if (_onDropIn != null)
+            {
+                await _onDropIn(paths, cardId);
+            }
+            else
+            {
+                foreach (var path in paths.Where(File.Exists))
+                {
+                    await _stateStore.AddToBasketAsync(RopeItem.FromFile(path));
+                }
+                _onBasketChanged?.Invoke();
+            }
+
+            await RefreshAsync();
+        }
+        catch (Exception ex)
+        {
+            // async void 中的异常会终止进程
+            System.Diagnostics.Trace.WriteLine($"[Clothesline] basket drop failed: {ex}");
+        }
+    }
+
+    private void SetDropHighlight(bool on)
+    {
+        RootBorder.BorderBrush = new SolidColorBrush(Color.Parse(on ? "#F59E0B" : "#1E293B"));
+        RootBorder.BorderThickness = new Thickness(on ? 3.5 : 2);
     }
 
     private void OnHeaderPointerPressed(object? sender, PointerPressedEventArgs e)
@@ -184,6 +251,7 @@ public partial class BasketWindow : Window
         rowGrid.Children.Add(hangBtn);
 
         rowBorder.Child = rowGrid;
+        rowBorder.ContextMenu = BuildRowMenu(item);
 
         rowBorder.PointerEntered += (_, _) =>
         {
@@ -207,6 +275,44 @@ public partial class BasketWindow : Window
         };
 
         return rowBorder;
+    }
+
+    private async Task CopyPathAsync(RopeItem item)
+    {
+        if (Clipboard != null)
+        {
+            await Clipboard.SetTextAsync(item.FilePath);
+        }
+    }
+
+    private static void FlashButton(Button button, string flashText, string normalText)
+    {
+        button.Content = flashText;
+        Avalonia.Threading.DispatcherTimer.RunOnce(() => button.Content = normalText, TimeSpan.FromSeconds(1.2));
+    }
+
+    private ContextMenu BuildRowMenu(RopeItem item)
+    {
+        var menu = new ContextMenu();
+
+        var copyPath = new MenuItem { Header = "复制文件路径" };
+        copyPath.Click += async (_, _) => await CopyPathAsync(item);
+        var copyFile = new MenuItem { Header = "复制文件" };
+        copyFile.Click += (_, _) => PlatformProvider.Current.CopyFilesToClipboard([item.FilePath]);
+        var rehang = new MenuItem { Header = "重新晾上" };
+        rehang.Click += async (_, _) => await RehangItemAsync(item);
+        var locate = new MenuItem { Header = "在文件夹中定位" };
+        locate.Click += (_, _) => PlatformProvider.Current.LocateInFileManager(item.FilePath);
+        var open = new MenuItem { Header = "打开文件" };
+        open.Click += (_, _) => PlatformProvider.Current.OpenFile(item.FilePath);
+
+        menu.Items.Add(copyPath);
+        menu.Items.Add(copyFile);
+        menu.Items.Add(new Separator());
+        menu.Items.Add(rehang);
+        menu.Items.Add(locate);
+        menu.Items.Add(open);
+        return menu;
     }
 
     private void SelectRow(RopeItem item)
@@ -239,6 +345,7 @@ public partial class BasketWindow : Window
             DetailFileName.Text = "未选择文件";
             DetailFileSize.Text = "-";
             DetailFilePath.Text = "-";
+            CopyPathButton.IsEnabled = false;
             PreviewImage.IsVisible = false;
             PreviewIcon.Text = "文件";
             PreviewIcon.IsVisible = true;
@@ -252,6 +359,7 @@ public partial class BasketWindow : Window
         DetailFileName.Text = item.FileName;
         DetailFileSize.Text = $"{item.FormattedFileSize} · {item.Badge.Text}";
         DetailFilePath.Text = item.FilePath;
+        CopyPathButton.IsEnabled = true;
 
         RehangButton.IsEnabled = true;
         LocateButton.IsEnabled = true;
@@ -263,8 +371,10 @@ public partial class BasketWindow : Window
         {
             try
             {
-                var bmp = new Bitmap(item.FilePath);
-                PreviewImage.Source = bmp;
+                using var stream = File.OpenRead(item.FilePath);
+                var previous = PreviewImage.Source as Bitmap;
+                PreviewImage.Source = Bitmap.DecodeToWidth(stream, 640); // 预览区不需要原图分辨率
+                previous?.Dispose();
                 PreviewImage.IsVisible = true;
                 PreviewIcon.IsVisible = false;
             }

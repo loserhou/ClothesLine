@@ -69,7 +69,7 @@ public class TrayManager : IDisposable
 
         _watchClipboardItem = new NativeMenuItem
         {
-            Header = "监听系统剪贴板截屏",
+            Header = "监听剪贴板（截屏 / 复制文件）",
             ToggleType = NativeMenuItemToggleType.CheckBox,
             IsChecked = _shelfWindow.IsClipboardWatcherEnabled
         };
@@ -83,7 +83,7 @@ public class TrayManager : IDisposable
 
         _autoHangItem = new NativeMenuItem
         {
-            Header = "截屏后自动挂上绳索",
+            Header = "剪贴板内容自动挂上绳索",
             ToggleType = NativeMenuItemToggleType.CheckBox,
             IsChecked = _shelfWindow.AutoHangScreenshots
         };

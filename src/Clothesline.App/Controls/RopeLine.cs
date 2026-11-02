@@ -2,6 +2,7 @@ using System;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Media;
+using Avalonia.Media.Immutable;
 
 namespace Clothesline.App.Controls;
 
@@ -68,6 +69,33 @@ public class RopeLine : Control
         return 18.0 + sagOffset;
     }
 
+    // 渲染资源全部缓存为不可变对象：绳索在动画期间每帧重绘，避免每帧 Color.Parse 与画笔/画刷分配
+    private const double StartY = 18.0;
+    private static readonly IPen ShadowPen = new ImmutablePen(new ImmutableSolidColorBrush(Color.FromArgb(45, 30, 41, 59)), 3.2, lineCap: PenLineCap.Round);
+    private static readonly IImmutableBrush GraphiteBrush = new ImmutableSolidColorBrush(Color.Parse("#1E293B"));
+    private static readonly IImmutableBrush CoreBrush = new ImmutableSolidColorBrush(Color.Parse("#E2CDAE"));
+    private static readonly IImmutableBrush CoreHighlightBrush = new ImmutableSolidColorBrush(Color.Parse("#FFF0D4"));
+    private static readonly IImmutableBrush GlowBrush = new ImmutableSolidColorBrush(Color.FromArgb(140, 245, 158, 11));
+    private static readonly IImmutableBrush InnerGlowBrush = new ImmutableSolidColorBrush(Color.FromArgb(200, 254, 240, 138));
+    private static readonly IPen TwistPen = new ImmutablePen(GraphiteBrush, 1.0, new ImmutableDashStyle(new double[] { 4, 6 }, 0), PenLineCap.Round);
+
+    private IPen? _outlinePen, _outlinePenHighlighted, _corePen, _corePenHighlighted, _glowPen, _innerGlowPen, _shadowPen;
+    private double _pensThickness = double.NaN;
+
+    private void EnsurePens()
+    {
+        double t = RopeThickness;
+        if (t == _pensThickness) return;
+        _pensThickness = t;
+        _outlinePen = new ImmutablePen(GraphiteBrush, t + 1.2, lineCap: PenLineCap.Round);
+        _outlinePenHighlighted = new ImmutablePen(GraphiteBrush, t + 1.8, lineCap: PenLineCap.Round);
+        _corePen = new ImmutablePen(CoreBrush, t - 0.8, lineCap: PenLineCap.Round);
+        _corePenHighlighted = new ImmutablePen(CoreHighlightBrush, t - 0.4, lineCap: PenLineCap.Round);
+        _glowPen = new ImmutablePen(GlowBrush, t + 8.0, lineCap: PenLineCap.Round);
+        _innerGlowPen = new ImmutablePen(InnerGlowBrush, t + 3.2, lineCap: PenLineCap.Round);
+        _shadowPen = t == 3.2 ? ShadowPen : new ImmutablePen(new ImmutableSolidColorBrush(Color.FromArgb(45, 30, 41, 59)), t, lineCap: PenLineCap.Round);
+    }
+
     public override void Render(DrawingContext context)
     {
         base.Render(context);
@@ -75,60 +103,41 @@ public class RopeLine : Control
         double width = Bounds.Width;
         if (width <= 0) return;
 
-        double startY = 18.0;
-        double sag = Sag;
-        var startPoint = new Point(0, startY);
-        var endPoint = new Point(width, startY);
-        var controlPoint = new Point(width / 2.0, startY + 2.0 * sag);
+        EnsurePens();
+        bool highlighted = IsHighlighted;
 
-        // 主麻绳几何路径
+        // 主麻绳几何路径（阴影与拧绳排线复用同一几何，仅做垂直平移）
         var outlineGeometry = new StreamGeometry();
         using (var ctx = outlineGeometry.Open())
         {
-            ctx.BeginFigure(startPoint, false);
-            ctx.QuadraticBezierTo(controlPoint, endPoint);
+            ctx.BeginFigure(new Point(0, StartY), false);
+            ctx.QuadraticBezierTo(new Point(width / 2.0, StartY + 2.0 * Sag), new Point(width, StartY));
             ctx.EndFigure(false);
         }
 
         // 0. 拖拽悬停高亮提示：温暖手绘素描金黄光晕 (优雅指示可挂绳有效区域)
-        if (IsHighlighted)
+        if (highlighted)
         {
-            var glowPen = new Pen(new SolidColorBrush(Color.FromArgb(140, 245, 158, 11)), RopeThickness + 8.0, lineCap: PenLineCap.Round);
-            context.DrawGeometry(null, glowPen, outlineGeometry);
-            var innerGlowPen = new Pen(new SolidColorBrush(Color.FromArgb(200, 254, 240, 138)), RopeThickness + 3.2, lineCap: PenLineCap.Round);
-            context.DrawGeometry(null, innerGlowPen, outlineGeometry);
+            context.DrawGeometry(null, _glowPen, outlineGeometry);
+            context.DrawGeometry(null, _innerGlowPen, outlineGeometry);
         }
 
-        // 1. 底层硬边缘手绘阴影 (3px 偏移)
-        var shadowGeometry = new StreamGeometry();
-        using (var ctx = shadowGeometry.Open())
+        // 1. 底层硬边缘手绘阴影 (2.2px 偏移)
+        using (context.PushTransform(Matrix.CreateTranslation(0, 2.2)))
         {
-            ctx.BeginFigure(new Point(0, startY + 2.2), false);
-            ctx.QuadraticBezierTo(new Point(controlPoint.X, controlPoint.Y + 2.2), new Point(endPoint.X, endPoint.Y + 2.2));
-            ctx.EndFigure(false);
+            context.DrawGeometry(null, _shadowPen, outlineGeometry);
         }
-        var shadowPen = new Pen(new SolidColorBrush(Color.FromArgb(45, 30, 41, 59)), RopeThickness, lineCap: PenLineCap.Round);
-        context.DrawGeometry(null, shadowPen, shadowGeometry);
 
         // 2. 主麻绳石墨勾线 (手绘深铅笔灰)
-        var outlinePen = new Pen(new SolidColorBrush(Color.Parse("#1E293B")), RopeThickness + (IsHighlighted ? 1.8 : 1.2), lineCap: PenLineCap.Round);
-        context.DrawGeometry(null, outlinePen, outlineGeometry);
+        context.DrawGeometry(null, highlighted ? _outlinePenHighlighted : _outlinePen, outlineGeometry);
 
-        // 3. 绳身双股天然麻芯 (暖麻色 #D4BA9F，高亮时微亮变金黄麦草色)
-        var coreBrush = new SolidColorBrush(IsHighlighted ? Color.Parse("#FFF0D4") : Color.Parse("#E2CDAE"));
-        var corePen = new Pen(coreBrush, RopeThickness - (IsHighlighted ? 0.4 : 0.8), lineCap: PenLineCap.Round);
-        context.DrawGeometry(null, corePen, outlineGeometry);
+        // 3. 绳身双股天然麻芯 (暖麻色，高亮时微亮变金黄麦草色)
+        context.DrawGeometry(null, highlighted ? _corePenHighlighted : _corePen, outlineGeometry);
 
         // 4. 麻绳螺旋手绘断线点缀 (素描拧绳排线)
-        var twistGeometry = new StreamGeometry();
-        using (var ctx = twistGeometry.Open())
+        using (context.PushTransform(Matrix.CreateTranslation(0, -0.4)))
         {
-            ctx.BeginFigure(new Point(0, startY - 0.4), false);
-            ctx.QuadraticBezierTo(new Point(controlPoint.X, controlPoint.Y - 0.4), new Point(endPoint.X, endPoint.Y - 0.4));
-            ctx.EndFigure(false);
+            context.DrawGeometry(null, TwistPen, outlineGeometry);
         }
-        var twistPen = new Pen(new SolidColorBrush(Color.Parse("#1E293B")), 1.0, lineCap: PenLineCap.Round,
-            dashStyle: new DashStyle(new double[] { 4, 6 }, 0));
-        context.DrawGeometry(null, twistPen, twistGeometry);
     }
 }

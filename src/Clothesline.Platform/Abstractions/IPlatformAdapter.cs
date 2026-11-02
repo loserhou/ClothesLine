@@ -54,4 +54,9 @@ public interface IPlatformAdapter
     /// 从系统原生剪贴板读取位图数据并安全保存为标准 PNG 文件
     /// </summary>
     bool TrySaveClipboardImage(string targetPngPath);
+
+    /// <summary>
+    /// 读取系统剪贴板中「复制的文件」路径列表（资源管理器 Ctrl+C / 访达 Cmd+C）；没有文件时返回空列表
+    /// </summary>
+    IReadOnlyList<string> GetClipboardFilePaths();
 }

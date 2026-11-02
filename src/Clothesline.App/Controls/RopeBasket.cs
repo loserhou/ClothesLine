@@ -4,6 +4,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Media;
+using Avalonia.Media.Immutable;
 using Clothesline.Core.Physics;
 
 namespace Clothesline.App.Controls;
@@ -40,11 +41,6 @@ public class RopeBasket : Control
 
     private bool _isHovered;
 
-    static RopeBasket()
-    {
-        AffectsRender<RopeBasket>(ItemCountProperty, IsHighlightedProperty);
-    }
-
     public RopeBasket()
     {
         Width = 100;
@@ -54,7 +50,8 @@ public class RopeBasket : Control
         DragDrop.SetAllowDrop(this, true);
     }
 
-    public void StepPhysics(double dt)
+    /// <returns>收纳篮所有弹簧是否均已静止</returns>
+    public bool StepPhysics(double dt)
     {
         ScaleMotion.Target = IsHighlighted ? 1.16 : (_isHovered ? 1.05 : 1.0);
 
@@ -67,6 +64,8 @@ public class RopeBasket : Control
         {
             InvalidateVisual();
         }
+
+        return SwingMotion.Settled && CounterMotion.Settled && ScaleMotion.Settled;
     }
 
     /// <summary>
@@ -103,184 +102,203 @@ public class RopeBasket : Control
         e.Handled = true;
     }
 
-    public override void Render(DrawingContext context)
+    // ===== 渲染资源缓存 =====
+    // 篮子的全部几何形状都是局部坐标系下的常量（摆动/缩放通过 PushTransform 实现），
+    // 因此几何、画笔、画刷均只构建一次；动画期间每帧重绘不再产生大量分配与 Color.Parse。
+    private static readonly IImmutableBrush InkBrush = new ImmutableSolidColorBrush(Color.Parse("#1E293B"));
+    private static readonly IImmutableBrush LinenBrush = new ImmutableSolidColorBrush(Color.Parse("#FFFDF9"));
+    private static readonly IImmutableBrush EmptyBadgeBrush = new ImmutableSolidColorBrush(Color.Parse("#EFE7DC"));
+    private static readonly IImmutableBrush FillNormal = new ImmutableSolidColorBrush(Color.Parse("#F4ECE1"));
+    private static readonly IImmutableBrush FillHovered = new ImmutableSolidColorBrush(Color.Parse("#FDF8F0"));
+    private static readonly IImmutableBrush FillHighlighted = new ImmutableSolidColorBrush(Color.Parse("#FFF1D6"));
+    private static readonly IPen SketchBorder = new ImmutablePen(InkBrush, 1.8, lineCap: PenLineCap.Round, lineJoin: PenLineJoin.Round);
+    private static readonly IPen FineSketch = new ImmutablePen(InkBrush, 1.2, lineCap: PenLineCap.Round);
+    private static readonly IPen HandleOuterPen = new ImmutablePen(InkBrush, 2.4, lineCap: PenLineCap.Round);
+    private static readonly IPen HandleInnerPen = new ImmutablePen(new ImmutableSolidColorBrush(Color.Parse("#E2CDAE")), 1.2, lineCap: PenLineCap.Round);
+    private static readonly IPen HaloPen = new ImmutablePen(new ImmutableSolidColorBrush(Color.FromArgb(150, 245, 158, 11)), 7.0, lineCap: PenLineCap.Round, lineJoin: PenLineJoin.Round);
+    private static readonly IPen InnerHaloPen = new ImmutablePen(new ImmutableSolidColorBrush(Color.FromArgb(200, 254, 240, 138)), 3.2, lineCap: PenLineCap.Round, lineJoin: PenLineJoin.Round);
+    private static readonly IPen HatchPen = new ImmutablePen(new ImmutableSolidColorBrush(Color.FromArgb(95, 30, 41, 59)), 1.1, lineCap: PenLineCap.Round);
+    private static readonly IPen ShadowHatchPen = new ImmutablePen(new ImmutableSolidColorBrush(Color.FromArgb(130, 30, 41, 59)), 1.1, lineCap: PenLineCap.Round);
+    private static readonly IPen StitchPen = new ImmutablePen(new ImmutableSolidColorBrush(Color.FromArgb(120, 30, 41, 59)), 1.0, lineCap: PenLineCap.Round);
+    private static readonly Typeface BadgeTypeface = new("Inter, Segoe UI, sans-serif", FontStyle.Normal, FontWeight.Bold);
+
+    private static readonly Point Pivot = new(50.0, 2.0); // (Width / 2, 2)，Width 固定为 100
+    private static readonly Geometry HookGeometry = BuildHook();
+    private static readonly Geometry LeftHandle = BuildCubic(new Point(18, 36), new Point(6, 38), new Point(6, 52), new Point(20, 54));
+    private static readonly Geometry RightHandle = BuildCubic(new Point(82, 36), new Point(94, 38), new Point(94, 52), new Point(80, 54));
+    private static readonly Geometry BasketBody = BuildBody(0);
+    private static readonly Geometry ShadowBody = BuildBody(3.5);
+    private static readonly Geometry RibsGeometry;
+    private static readonly Geometry HatchGeometry;
+    private static readonly Geometry ShadowHatchGeometry = BuildShadowHatch();
+    private static readonly Geometry LinerGeometry = BuildLiner(0);
+    private static readonly Geometry LinerShadow = BuildLiner(2);
+    private static readonly Geometry StitchGeometry = BuildLines(
+        (new Point(30, 31), new Point(30, 39)), (new Point(48, 31), new Point(48, 39)), (new Point(66, 31), new Point(66, 39)));
+
+    private FormattedText? _badgeText;
+    private int _badgeTextCount = -1;
+
+    static RopeBasket()
     {
-        base.Render(context);
+        AffectsRender<RopeBasket>(ItemCountProperty, IsHighlightedProperty);
+        (RibsGeometry, HatchGeometry) = BuildWicker();
+    }
 
-        // 挂钩旋转与缩放轴心点：(Width / 2, 2)
-        var pivot = new Point(Width / 2.0, 2.0);
-        double angle = SwingMotion.Position;
-        double scale = ScaleMotion.Position;
+    private static Geometry BuildHook()
+    {
+        var g = new StreamGeometry();
+        using var c = g.Open();
+        c.BeginFigure(new Point(Pivot.X + 8, Pivot.Y + 12), false);
+        c.ArcTo(new Point(Pivot.X - 8, Pivot.Y + 2), new Size(8, 8), 0, false, SweepDirection.CounterClockwise);
+        c.LineTo(new Point(Pivot.X, Pivot.Y + 22));
+        c.EndFigure(false);
+        return g;
+    }
 
-        using (context.PushTransform(Matrix.CreateTranslation(-pivot.X, -pivot.Y) *
-                                     Matrix.CreateScale(scale, scale) *
-                                     Matrix.CreateRotation(Math.PI * angle / 180.0) *
-                                     Matrix.CreateTranslation(pivot.X, pivot.Y)))
+    private static Geometry BuildCubic(Point start, Point c1, Point c2, Point end)
+    {
+        var g = new StreamGeometry();
+        using var c = g.Open();
+        c.BeginFigure(start, false);
+        c.CubicBezierTo(c1, c2, end);
+        c.EndFigure(false);
+        return g;
+    }
+
+    // 梯形收口藤编筐主体 (上宽 66px, 下宽 50px, 高 64px)；offset 用于手绘硬阴影
+    private static Geometry BuildBody(double o)
+    {
+        var g = new StreamGeometry();
+        using var c = g.Open();
+        c.BeginFigure(new Point(17 + o, 28 + o), true);
+        c.LineTo(new Point(83 + o, 28 + o));
+        c.LineTo(new Point(76 + o, 88 + o));
+        c.ArcTo(new Point(70 + o, 93 + o), new Size(5, 5), 0, false, SweepDirection.Clockwise);
+        c.LineTo(new Point(30 + o, 93 + o));
+        c.ArcTo(new Point(24 + o, 88 + o), new Size(5, 5), 0, false, SweepDirection.Clockwise);
+        c.LineTo(new Point(17 + o, 28 + o));
+        c.EndFigure(true);
+        return g;
+    }
+
+    private static (Geometry Ribs, Geometry Hatch) BuildWicker()
+    {
+        var ribs = new StreamGeometry();
+        var hatch = new StreamGeometry();
+        using (var rc = ribs.Open())
+        using (var hc = hatch.Open())
         {
-            var sketchBorder = new Pen(new SolidColorBrush(Color.Parse("#1E293B")), 1.8, lineCap: PenLineCap.Round, lineJoin: PenLineJoin.Round);
-            var fineSketch = new Pen(new SolidColorBrush(Color.Parse("#1E293B")), 1.2, lineCap: PenLineCap.Round);
-            var shadowBrush = new SolidColorBrush(Color.Parse("#1E293B"));
-
-            // 1. 顶端手弯金属细铁丝挂钩 (挂在晾衣绳线上)
-            var hookGeometry = new StreamGeometry();
-            using (var sgc = hookGeometry.Open())
+            foreach (double ribY in new[] { 48.0, 60.0, 72.0, 84.0 })
             {
-                sgc.BeginFigure(new Point(pivot.X + 8, pivot.Y + 12), false);
-                sgc.ArcTo(new Point(pivot.X - 8, pivot.Y + 2), new Size(8, 8), 0, false, SweepDirection.CounterClockwise);
-                sgc.LineTo(new Point(pivot.X, pivot.Y + 22));
-            }
-            context.DrawGeometry(null, sketchBorder, hookGeometry);
-
-            // 挂钩金属连接吊环
-            context.DrawEllipse(new SolidColorBrush(Color.Parse("#FFFDF9")), sketchBorder, new Point(pivot.X, pivot.Y + 22), 3.5, 3.5);
-
-            // 2. 左右两侧手工编织麻绳提手 (Braided Rope Handles)
-            // 左侧提手
-            var leftHandle = new StreamGeometry();
-            using (var lhc = leftHandle.Open())
-            {
-                lhc.BeginFigure(new Point(18, 36), false);
-                lhc.CubicBezierTo(new Point(6, 38), new Point(6, 52), new Point(20, 54));
-            }
-            context.DrawGeometry(null, new Pen(new SolidColorBrush(Color.Parse("#1E293B")), 2.4, lineCap: PenLineCap.Round), leftHandle);
-            context.DrawGeometry(null, new Pen(new SolidColorBrush(Color.Parse("#E2CDAE")), 1.2, lineCap: PenLineCap.Round), leftHandle);
-
-            // 右侧提手
-            var rightHandle = new StreamGeometry();
-            using (var rhc = rightHandle.Open())
-            {
-                rhc.BeginFigure(new Point(82, 36), false);
-                rhc.CubicBezierTo(new Point(94, 38), new Point(94, 52), new Point(80, 54));
-            }
-            context.DrawGeometry(null, new Pen(new SolidColorBrush(Color.Parse("#1E293B")), 2.4, lineCap: PenLineCap.Round), rightHandle);
-            context.DrawGeometry(null, new Pen(new SolidColorBrush(Color.Parse("#E2CDAE")), 1.2, lineCap: PenLineCap.Round), rightHandle);
-
-            // 3. 梯形收口藤编筐主体 (上宽 66px, 下宽 50px, 高 64px)
-            // 顶点坐标：左上(17, 28), 右上(83, 28), 右下(76, 88), 左下(24, 88)
-            var basketBody = new StreamGeometry();
-            using (var bc = basketBody.Open())
-            {
-                bc.BeginFigure(new Point(17, 28), true);
-                bc.LineTo(new Point(83, 28));
-                bc.LineTo(new Point(76, 88));
-                bc.ArcTo(new Point(70, 93), new Size(5, 5), 0, false, SweepDirection.Clockwise);
-                bc.LineTo(new Point(30, 93));
-                bc.ArcTo(new Point(24, 88), new Size(5, 5), 0, false, SweepDirection.Clockwise);
-                bc.LineTo(new Point(17, 28));
-                bc.EndFigure(true);
-            }
-
-            // (A0) 拖拽靠近时暖阳手绘金光轮廓 (指示拖放即可收纳进篮)
-            if (IsHighlighted)
-            {
-                var haloPen = new Pen(new SolidColorBrush(Color.FromArgb(150, 245, 158, 11)), 7.0, lineCap: PenLineCap.Round, lineJoin: PenLineJoin.Round);
-                context.DrawGeometry(null, haloPen, basketBody);
-                var innerHalo = new Pen(new SolidColorBrush(Color.FromArgb(200, 254, 240, 138)), 3.2, lineCap: PenLineCap.Round, lineJoin: PenLineJoin.Round);
-                context.DrawGeometry(null, innerHalo, basketBody);
-            }
-
-            // (A) 硬核手绘偏移阴影 (3.5px 偏移)
-            var shadowBody = new StreamGeometry();
-            using (var sbc = shadowBody.Open())
-            {
-                sbc.BeginFigure(new Point(20.5, 31.5), true);
-                sbc.LineTo(new Point(86.5, 31.5));
-                sbc.LineTo(new Point(79.5, 91.5));
-                sbc.ArcTo(new Point(73.5, 96.5), new Size(5, 5), 0, false, SweepDirection.Clockwise);
-                sbc.LineTo(new Point(33.5, 96.5));
-                sbc.ArcTo(new Point(27.5, 91.5), new Size(5, 5), 0, false, SweepDirection.Clockwise);
-                sbc.LineTo(new Point(20.5, 31.5));
-                sbc.EndFigure(true);
-            }
-            context.DrawGeometry(shadowBrush, null, shadowBody);
-
-            // (B) 暖色竹藤编织底色 (高亮时变亮为阳光暖麦金色)
-            string fillColor = IsHighlighted ? "#FFF1D6" : (_isHovered ? "#FDF8F0" : "#F4ECE1");
-            var basketFill = new SolidColorBrush(Color.Parse(fillColor));
-            context.DrawGeometry(basketFill, sketchBorder, basketBody);
-
-            // 4. 细腻交错竹藤素描编织排线 (Intricate Wicker Weaving)
-            var hatchBrush = new SolidColorBrush(Color.FromArgb(95, 30, 41, 59));
-            var hatchPen = new Pen(hatchBrush, 1.1, lineCap: PenLineCap.Round);
-            var shadowHatchPen = new Pen(new SolidColorBrush(Color.FromArgb(130, 30, 41, 59)), 1.1, lineCap: PenLineCap.Round);
-
-            // 横向加强编织肋条
-            double[] ribs = [48.0, 60.0, 72.0, 84.0];
-            foreach (double ribY in ribs)
-            {
-                // 计算当前高度下的梯形左右边界
                 double progress = (ribY - 28.0) / (93.0 - 28.0);
                 double leftX = 17.0 + (24.0 - 17.0) * progress;
                 double rightX = 83.0 - (83.0 - 76.0) * progress;
 
-                // 略带自然弧度的编织横梁
-                var ribPath = new StreamGeometry();
-                using (var rpc = ribPath.Open())
-                {
-                    rpc.BeginFigure(new Point(leftX + 2, ribY), false);
-                    rpc.QuadraticBezierTo(new Point(50, ribY + 1.8), new Point(rightX - 2, ribY));
-                }
-                context.DrawGeometry(null, fineSketch, ribPath);
+                rc.BeginFigure(new Point(leftX + 2, ribY), false);
+                rc.QuadraticBezierTo(new Point(50, ribY + 1.8), new Point(rightX - 2, ribY));
+                rc.EndFigure(false);
 
-                // 交叉藤条手绘针脚 (/// 与 \\\\)
                 for (double hx = leftX + 4; hx <= rightX - 6; hx += 8.5)
                 {
-                    context.DrawLine(hatchPen, new Point(hx, ribY - 4.5), new Point(hx + 4.5, ribY + 4.5));
-                    context.DrawLine(hatchPen, new Point(hx + 4.5, ribY - 4.5), new Point(hx, ribY + 4.5));
+                    hc.BeginFigure(new Point(hx, ribY - 4.5), false);
+                    hc.LineTo(new Point(hx + 4.5, ribY + 4.5));
+                    hc.EndFigure(false);
+                    hc.BeginFigure(new Point(hx + 4.5, ribY - 4.5), false);
+                    hc.LineTo(new Point(hx, ribY + 4.5));
+                    hc.EndFigure(false);
                 }
             }
+        }
+        return (ribs, hatch);
+    }
 
-            // 左右两侧圆弧明暗交界手绘排线
-            for (double sy = 44; sy <= 88; sy += 5)
+    private static Geometry BuildShadowHatch()
+    {
+        var lines = new List<(Point, Point)>();
+        for (double sy = 44; sy <= 88; sy += 5)
+        {
+            lines.Add((new Point(22, sy), new Point(28, sy + 3)));
+            lines.Add((new Point(78, sy), new Point(72, sy + 3)));
+        }
+        return BuildLines(lines.ToArray());
+    }
+
+    private static Geometry BuildLines(params (Point From, Point To)[] lines)
+    {
+        var g = new StreamGeometry();
+        using var c = g.Open();
+        foreach (var (from, to) in lines)
+        {
+            c.BeginFigure(from, false);
+            c.LineTo(to);
+            c.EndFigure(false);
+        }
+        return g;
+    }
+
+    // 顶部翻折纯棉白亚麻布内衬，带 4 个柔和布褶下摆；offset 用于布艺阴影
+    private static Geometry BuildLiner(double o)
+    {
+        var g = new StreamGeometry();
+        using var c = g.Open();
+        c.BeginFigure(new Point(14 + o, 25 + o), true);
+        c.LineTo(new Point(86 + o, 25 + o));
+        c.LineTo(new Point(84 + o, 40 + o));
+        c.QuadraticBezierTo(new Point(75 + o, 43 + o), new Point(66 + o, 40 + o));
+        c.QuadraticBezierTo(new Point(57 + o, 43 + o), new Point(48 + o, 40 + o));
+        c.QuadraticBezierTo(new Point(39 + o, 43 + o), new Point(30 + o, 40 + o));
+        c.QuadraticBezierTo(new Point(21 + o, 43 + o), new Point(16 + o, 40 + o));
+        c.LineTo(new Point(14 + o, 25 + o));
+        c.EndFigure(true);
+        return g;
+    }
+
+    public override void Render(DrawingContext context)
+    {
+        base.Render(context);
+
+        double angle = SwingMotion.Position;
+        double scale = ScaleMotion.Position;
+
+        using (context.PushTransform(Matrix.CreateTranslation(-Pivot.X, -Pivot.Y) *
+                                     Matrix.CreateScale(scale, scale) *
+                                     Matrix.CreateRotation(Math.PI * angle / 180.0) *
+                                     Matrix.CreateTranslation(Pivot.X, Pivot.Y)))
+        {
+            // 1. 顶端手弯金属细铁丝挂钩与吊环
+            context.DrawGeometry(null, SketchBorder, HookGeometry);
+            context.DrawEllipse(LinenBrush, SketchBorder, new Point(Pivot.X, Pivot.Y + 22), 3.5, 3.5);
+
+            // 2. 左右两侧手工编织麻绳提手
+            context.DrawGeometry(null, HandleOuterPen, LeftHandle);
+            context.DrawGeometry(null, HandleInnerPen, LeftHandle);
+            context.DrawGeometry(null, HandleOuterPen, RightHandle);
+            context.DrawGeometry(null, HandleInnerPen, RightHandle);
+
+            // 3. 拖拽靠近时暖阳手绘金光轮廓
+            if (IsHighlighted)
             {
-                context.DrawLine(shadowHatchPen, new Point(22, sy), new Point(28, sy + 3));
-                context.DrawLine(shadowHatchPen, new Point(78, sy), new Point(72, sy + 3));
+                context.DrawGeometry(null, HaloPen, BasketBody);
+                context.DrawGeometry(null, InnerHaloPen, BasketBody);
             }
 
-            // 5. 顶部翻折纯棉白亚麻布内衬 (Turned-Over Linen Liner)
-            // 盖在篮筐上沿，带有手绘自然波浪垂坠折痕
-            var linerGeometry = new StreamGeometry();
-            using (var lgc = linerGeometry.Open())
-            {
-                lgc.BeginFigure(new Point(14, 25), true);
-                lgc.LineTo(new Point(86, 25));
-                lgc.LineTo(new Point(84, 40));
-                // 4 个柔和圆润的布褶下摆
-                lgc.QuadraticBezierTo(new Point(75, 43), new Point(66, 40));
-                lgc.QuadraticBezierTo(new Point(57, 43), new Point(48, 40));
-                lgc.QuadraticBezierTo(new Point(39, 43), new Point(30, 40));
-                lgc.QuadraticBezierTo(new Point(21, 43), new Point(16, 40));
-                lgc.LineTo(new Point(14, 25));
-                lgc.EndFigure(true);
-            }
+            // 筐体硬阴影 + 竹藤底色
+            context.DrawGeometry(InkBrush, null, ShadowBody);
+            var fill = IsHighlighted ? FillHighlighted : (_isHovered ? FillHovered : FillNormal);
+            context.DrawGeometry(fill, SketchBorder, BasketBody);
 
-            // 布艺阴影
-            var linerShadow = new StreamGeometry();
-            using (var lsc = linerShadow.Open())
-            {
-                lsc.BeginFigure(new Point(16, 27), true);
-                lsc.LineTo(new Point(88, 27));
-                lsc.LineTo(new Point(86, 42));
-                lsc.QuadraticBezierTo(new Point(77, 45), new Point(68, 42));
-                lsc.QuadraticBezierTo(new Point(59, 45), new Point(50, 42));
-                lsc.QuadraticBezierTo(new Point(41, 45), new Point(32, 42));
-                lsc.QuadraticBezierTo(new Point(23, 45), new Point(18, 42));
-                lsc.LineTo(new Point(16, 27));
-                lsc.EndFigure(true);
-            }
-            context.DrawGeometry(shadowBrush, null, linerShadow);
+            // 4. 交错竹藤编织排线
+            context.DrawGeometry(null, FineSketch, RibsGeometry);
+            context.DrawGeometry(null, HatchPen, HatchGeometry);
+            context.DrawGeometry(null, ShadowHatchPen, ShadowHatchGeometry);
 
-            // 纯白亚麻布填充与墨线轮廓
-            var linenFill = new SolidColorBrush(Color.Parse("#FFFDF9"));
-            context.DrawGeometry(linenFill, sketchBorder, linerGeometry);
+            // 5. 翻折亚麻布内衬
+            context.DrawGeometry(InkBrush, null, LinerShadow);
+            context.DrawGeometry(LinenBrush, SketchBorder, LinerGeometry);
+            context.DrawGeometry(null, StitchPen, StitchGeometry);
 
-            // 布折素描阴影线与虚线针脚
-            var stitchPen = new Pen(new SolidColorBrush(Color.FromArgb(120, 30, 41, 59)), 1.0, lineCap: PenLineCap.Round);
-            context.DrawLine(stitchPen, new Point(30, 31), new Point(30, 39));
-            context.DrawLine(stitchPen, new Point(48, 31), new Point(48, 39));
-            context.DrawLine(stitchPen, new Point(66, 31), new Point(66, 39));
-
-            // 6. 悬挂于篮筐边缘的精巧手撕牛皮纸便签计数角标 (Paper Tag Badge)
+            // 6. 牛皮纸便签计数角标
             double badgeScale = Math.Clamp(CounterMotion.Position, 0.5, 2.2);
             var badgePivot = new Point(78, 22);
 
@@ -288,33 +306,28 @@ public class RopeBasket : Control
                                          Matrix.CreateScale(badgeScale, badgeScale) *
                                          Matrix.CreateTranslation(badgePivot.X, badgePivot.Y)))
             {
-                string text = ItemCount > 99 ? "99+" : ItemCount.ToString();
-                var formatted = new FormattedText(
-                    text,
-                    CultureInfo.InvariantCulture,
-                    FlowDirection.LeftToRight,
-                    new Typeface("Inter, Segoe UI, sans-serif", FontStyle.Normal, FontWeight.Bold),
-                    11.0,
-                    new SolidColorBrush(Color.Parse("#1E293B")));
+                int count = ItemCount;
+                if (_badgeText == null || _badgeTextCount != count)
+                {
+                    _badgeTextCount = count;
+                    _badgeText = new FormattedText(
+                        count > 99 ? "99+" : count.ToString(CultureInfo.InvariantCulture),
+                        CultureInfo.InvariantCulture,
+                        FlowDirection.LeftToRight,
+                        BadgeTypeface,
+                        11.0,
+                        InkBrush);
+                }
+                var formatted = _badgeText;
 
                 double badgeWidth = Math.Max(22, formatted.Width + 12);
                 double badgeHeight = 20;
                 var badgeRect = new Rect(badgePivot.X - badgeWidth / 2.0, badgePivot.Y - badgeHeight / 2.0, badgeWidth, badgeHeight);
 
-                // 便签角标硬投影 (2.5px 偏移)
-                context.DrawRectangle(shadowBrush, null, new Rect(badgeRect.X + 2.5, badgeRect.Y + 2.5, badgeWidth, badgeHeight), 5, 5);
+                context.DrawRectangle(InkBrush, null, new Rect(badgeRect.X + 2.5, badgeRect.Y + 2.5, badgeWidth, badgeHeight), 5, 5);
+                context.DrawRectangle(count > 0 ? LinenBrush : EmptyBadgeBrush, SketchBorder, badgeRect, 5, 5);
+                context.DrawEllipse(InkBrush, null, new Point(badgeRect.X + 4.5, badgeRect.Y + 4.5), 1.2, 1.2);
 
-                // 便签底色：有收纳项时呈现明快的暖象牙便签白 (#FFFDF9)，空时呈现低调浅米色 (#EFE7DC)
-                var badgeBg = ItemCount > 0
-                    ? new SolidColorBrush(Color.Parse("#FFFDF9"))
-                    : new SolidColorBrush(Color.Parse("#EFE7DC"));
-
-                context.DrawRectangle(badgeBg, sketchBorder, badgeRect, 5, 5);
-
-                // 便签左上方小系绳孔 (Tag Eyelet)
-                context.DrawEllipse(new SolidColorBrush(Color.Parse("#1E293B")), null, new Point(badgeRect.X + 4.5, badgeRect.Y + 4.5), 1.2, 1.2);
-
-                // 居中绘制清晰数字
                 double textX = badgeRect.X + (badgeWidth - formatted.Width) / 2.0;
                 double textY = badgeRect.Y + (badgeHeight - formatted.Height) / 2.0;
                 context.DrawText(formatted, new Point(textX, textY));

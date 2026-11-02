@@ -25,6 +25,17 @@ public partial class HoverPreviewWindow : Window
         }
     }
 
+    protected override void OnClosed(EventArgs e)
+    {
+        base.OnClosed(e);
+        // 预览位图最大 640px 宽，每次悬停都会新解码一张；窗口关闭即释放，避免依赖终结器回收原生内存
+        if (PreviewImage.Source is Avalonia.Media.Imaging.Bitmap bitmap)
+        {
+            PreviewImage.Source = null;
+            bitmap.Dispose();
+        }
+    }
+
     public void ApplyPreview(PreviewResult result)
     {
         TitleText.Text = result.Title;

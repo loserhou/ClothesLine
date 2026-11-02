@@ -87,6 +87,9 @@ internal static partial class Win32
     [LibraryImport("kernel32.dll")]
     public static partial nuint GlobalSize(IntPtr hMem);
 
+    [LibraryImport("shell32.dll", EntryPoint = "DragQueryFileW")]
+    public static unsafe partial uint DragQueryFile(IntPtr hDrop, uint iFile, char* lpszFile, uint cch);
+
     [LibraryImport("kernel32.dll")]
     public static partial IntPtr GlobalAlloc(uint uFlags, nuint dwBytes);
 
@@ -381,6 +384,48 @@ public class WindowsPlatformAdapter : IPlatformAdapter
         {
             return $"{size}_{Marshal.ReadInt32(ptr)}";
         }
+    }
+
+    public unsafe IReadOnlyList<string> GetClipboardFilePaths()
+    {
+        var result = new List<string>();
+        if (!Win32.IsClipboardFormatAvailable(Win32.CF_HDROP)) return result;
+
+        // 剪贴板可能被其他进程短暂占用，重试几次
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            if (!Win32.OpenClipboard(IntPtr.Zero))
+            {
+                Thread.Sleep(30);
+                continue;
+            }
+
+            try
+            {
+                IntPtr hDrop = Win32.GetClipboardData(Win32.CF_HDROP);
+                if (hDrop == IntPtr.Zero) return result;
+
+                uint count = Win32.DragQueryFile(hDrop, 0xFFFFFFFF, null, 0);
+                for (uint i = 0; i < count; i++)
+                {
+                    uint len = Win32.DragQueryFile(hDrop, i, null, 0);
+                    if (len == 0) continue;
+                    var buffer = new char[len + 1];
+                    fixed (char* p = buffer)
+                    {
+                        uint written = Win32.DragQueryFile(hDrop, i, p, len + 1);
+                        if (written > 0) result.Add(new string(p, 0, (int)written));
+                    }
+                }
+                return result;
+            }
+            finally
+            {
+                Win32.CloseClipboard();
+            }
+        }
+
+        return result;
     }
 
     public bool TrySaveClipboardImage(string targetPngPath)

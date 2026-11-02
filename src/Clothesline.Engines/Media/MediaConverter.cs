@@ -64,7 +64,7 @@ public class MediaConverter : IConverter
             }
             else
             {
-                ConvertViaMac(sourceFilePath, targetFilePath, normalizedTargetExt, progress);
+                ConvertViaMac(sourceFilePath, targetFilePath, normalizedTargetExt, progress, cancellationToken);
             }
 
             progress?.Report(1.0);
@@ -117,20 +117,119 @@ if ($prep.CanTranscode) {{
         }
     }
 
+    private static readonly string[] FfmpegCandidates =
+    [
+        "/opt/homebrew/bin/ffmpeg", // Apple Silicon Homebrew
+        "/usr/local/bin/ffmpeg",    // Intel Homebrew / 手动安装
+    ];
+
+    /// <summary>
+    /// 查找 ffmpeg。从访达/登录项启动的 GUI 进程拿不到 shell 的 PATH，因此先查 Homebrew 常见路径再查 PATH。
+    /// </summary>
+    private static string? FindFfmpeg()
+    {
+        foreach (var candidate in FfmpegCandidates)
+        {
+            if (File.Exists(candidate)) return candidate;
+        }
+
+        var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+        foreach (var dir in pathEnv.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var candidate = Path.Combine(dir, "ffmpeg");
+            if (File.Exists(candidate)) return candidate;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// macOS 音频提取：优先 ffmpeg（支持全部容器与 MP3 编码）；
+    /// 未安装 ffmpeg 时仅能用系统自带 afconvert 从 MP4/MOV/M4V 提取 WAV（afconvert 不能编码 MP3，也不认 MKV/AVI/WMV/WEBM）。
+    /// </summary>
     private static void ConvertViaMac(
         string sourceFilePath,
         string targetFilePath,
         string targetExt,
-        IProgress<double>? progress)
+        IProgress<double>? progress,
+        CancellationToken cancellationToken)
     {
+        progress?.Report(0.4);
+
         var psi = new ProcessStartInfo
         {
-            FileName = "afconvert",
-            Arguments = $"-f WAVE -d LEI16 \"{sourceFilePath}\" \"{targetFilePath}\"",
             UseShellExecute = false,
-            CreateNoWindow = true
+            CreateNoWindow = true,
+            RedirectStandardError = true,
+            RedirectStandardOutput = true
         };
-        using var proc = Process.Start(psi);
-        proc?.WaitForExit(10000);
+
+        var ffmpeg = FindFfmpeg();
+        var sourceExt = Path.GetExtension(sourceFilePath).TrimStart('.').ToUpperInvariant();
+
+        if (ffmpeg != null)
+        {
+            psi.FileName = ffmpeg;
+            foreach (var arg in new[] { "-y", "-nostdin", "-loglevel", "error", "-i", sourceFilePath, "-vn" })
+            {
+                psi.ArgumentList.Add(arg);
+            }
+            if (targetExt == "mp3")
+            {
+                psi.ArgumentList.Add("-codec:a"); psi.ArgumentList.Add("libmp3lame");
+                psi.ArgumentList.Add("-q:a"); psi.ArgumentList.Add("2");
+            }
+            else
+            {
+                psi.ArgumentList.Add("-codec:a"); psi.ArgumentList.Add("pcm_s16le");
+            }
+            psi.ArgumentList.Add(targetFilePath);
+        }
+        else if (targetExt == "wav" && sourceExt is "MP4" or "MOV" or "M4V")
+        {
+            psi.FileName = "/usr/bin/afconvert";
+            foreach (var arg in new[] { "-f", "WAVE", "-d", "LEI16", sourceFilePath, targetFilePath })
+            {
+                psi.ArgumentList.Add(arg);
+            }
+        }
+        else
+        {
+            throw new NotSupportedException(
+                $"macOS 上将 {sourceExt} 转为 {targetExt.ToUpperInvariant()} 需要 ffmpeg，请先执行: brew install ffmpeg");
+        }
+
+        RunToCompletion(psi, TimeSpan.FromMinutes(10), cancellationToken);
+        progress?.Report(0.9);
+
+        if (!File.Exists(targetFilePath) || new FileInfo(targetFilePath).Length == 0)
+        {
+            throw new InvalidOperationException($"音频提取失败: {targetFilePath}");
+        }
+    }
+
+    private static void RunToCompletion(ProcessStartInfo psi, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        using var proc = Process.Start(psi) ?? throw new InvalidOperationException($"无法启动 {psi.FileName}");
+        // 异步读取输出，避免管道写满导致子进程阻塞
+        var stderrTask = proc.StandardError.ReadToEndAsync();
+        _ = proc.StandardOutput.ReadToEndAsync();
+
+        var deadline = DateTime.UtcNow + timeout;
+        while (!proc.WaitForExit(200))
+        {
+            if (cancellationToken.IsCancellationRequested || DateTime.UtcNow > deadline)
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { }
+                cancellationToken.ThrowIfCancellationRequested();
+                throw new TimeoutException($"{Path.GetFileName(psi.FileName)} 转码超时");
+            }
+        }
+
+        if (proc.ExitCode != 0)
+        {
+            var err = stderrTask.Wait(1000) ? stderrTask.Result.Trim() : string.Empty;
+            throw new InvalidOperationException($"{Path.GetFileName(psi.FileName)} 退出码 {proc.ExitCode}: {err}");
+        }
     }
 }

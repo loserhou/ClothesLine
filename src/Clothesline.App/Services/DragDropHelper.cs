@@ -14,6 +14,39 @@ public static class DragDropHelper
     public const string CardFilePathFormat = "Clothesline.CardFilePath";
 
     /// <summary>
+    /// 读取晾衣绳卡片拖拽时附带的卡片 Id；外部拖入（访达/资源管理器）时没有该字段，返回 null。
+    /// 注意：macOS 上对不存在的自定义格式调用 Get 会抛 COMException("GetBytes failed")，必须先判断并兜底。
+    /// </summary>
+    public static string? TryGetCardId(IDataObject data)
+    {
+        try
+        {
+            if (!data.Contains(RopeItemIdFormat)) return null;
+            return data.Get(RopeItemIdFormat) as string;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 拖拽数据中是否可能带有文件（只做格式判断，不读取内容，适合高频 DragOver）
+    /// </summary>
+    public static bool MayContainFiles(IDataObject data)
+    {
+        try
+        {
+            return data.Contains(DataFormats.Files) || data.Contains(DataFormats.FileNames) ||
+                   data.Contains(CardFilePathFormat);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// 统一提取拖拽数据中的文件路径，兼容外部资源管理器 (IStorageItem) 与内部卡片拖拽 (string[] / FileNames / 自定义字段)
     /// </summary>
     public static List<string> ExtractFilePaths(IDataObject data)

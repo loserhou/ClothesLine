@@ -1,43 +1,69 @@
 using System.Diagnostics;
 using Clothesline.Platform.Abstractions;
+using static Clothesline.Platform.MacOS.MacNative;
 
 namespace Clothesline.Platform.MacOS;
 
 /// <summary>
-/// macOS 平台适配层（支持访达定位、关联程序打开与剪贴板桥接）
+/// macOS 平台适配层：CoreGraphics 全局光标/鼠标状态、NSWindow 鼠标穿透与跨桌面常驻、NSPasteboard 截屏捕获、访达定位
 /// </summary>
 public class MacOSPlatformAdapter : IPlatformAdapter
 {
+    // NSWindowCollectionBehavior: CanJoinAllSpaces | Stationary | IgnoresCycle
+    // 晾衣绳出现在每个桌面（Space）上，不参与 Mission Control 动画与 Cmd+` 窗口切换；
+    // 未设置 FullScreenAuxiliary，因此不会覆盖在全屏应用之上（即天然的全屏避让）。
+    private const ulong OverlayCollectionBehavior = (1UL << 0) | (1UL << 4) | (1UL << 6);
+
     public (int X, int Y) GetCursorPosition()
     {
-        // Avalonia 在 macOS 下由 PointerMoved 事件直接提供坐标，此处提供全局回退
-        return (0, 0);
+        // CoreGraphics 全局坐标：主屏左上角为原点、单位 point，与 Avalonia macOS 的屏幕/窗口坐标一致
+        var evt = CGEventCreate(IntPtr.Zero);
+        if (evt == IntPtr.Zero) return (0, 0);
+        try
+        {
+            var p = CGEventGetLocation(evt);
+            return ((int)Math.Round(p.X), (int)Math.Round(p.Y));
+        }
+        finally
+        {
+            CFRelease(evt);
+        }
     }
 
     public void PrepareOverlay(IntPtr windowHandle)
     {
-        // macOS 下由窗口属性处理
+        var window = ResolveWindow(windowHandle);
+        if (window == IntPtr.Zero) return;
+        SendVoid(window, Sel("setCollectionBehavior:"), OverlayCollectionBehavior);
+        SendVoid(window, Sel("setHasShadow:"), false);
     }
 
     public void SetWindowPassMouse(IntPtr windowHandle, bool passMouse)
     {
-        // macOS 下通过 NSWindow.ignoresMouseEvents 处理
+        var window = ResolveWindow(windowHandle);
+        if (window == IntPtr.Zero) return;
+        SendVoid(window, Sel("setIgnoresMouseEvents:"), passMouse);
     }
 
     public bool IsOverCaptionButtons((int X, int Y) cursor, IntPtr overlayWindow)
     {
-        // macOS 窗口红绿灯按钮位于左上角 (X <= 80, Y <= 30)
-        return cursor.X <= 80 && cursor.Y <= 30;
+        // macOS 的窗口红绿灯按钮跟随各窗口而非固定在屏幕角落；晾衣绳挂在菜单栏下方，无需全局避让区
+        return false;
     }
 
     public bool IsLeftMouseButtonDown()
     {
-        return false;
+        return CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, kCGMouseButtonLeft);
     }
 
     public bool TrySaveClipboardImage(string targetPngPath)
     {
-        return false;
+        return MacPasteboard.TrySaveImageAsPng(targetPngPath);
+    }
+
+    public IReadOnlyList<string> GetClipboardFilePaths()
+    {
+        return MacPasteboard.GetFilePaths();
     }
 
     public void OpenFile(string filePath)
@@ -80,7 +106,7 @@ public class MacOSPlatformAdapter : IPlatformAdapter
 
     public bool IsFullScreenAppActive()
     {
-        // macOS 全屏 Space 判定
+        // 全屏应用运行在独立 Space 中，晾衣绳窗口不会出现在那里（见 OverlayCollectionBehavior），无需额外判定
         return false;
     }
 

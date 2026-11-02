@@ -23,6 +23,18 @@ public partial class ShotCard : UserControl
     public event EventHandler<string>? Converted;
     public event EventHandler<RopeItem>? EditImageRequested;
 
+    /// <summary>卡片自身给弹簧注入了速度（如单击复制时的晃动），宿主需唤醒动画循环</summary>
+    public event EventHandler? MotionKicked;
+
+    /// <summary>卡片开始被拖出（宿主应收起悬停预览，避免预览浮窗挡住拖放目标）</summary>
+    public event EventHandler? DragStarted;
+
+    private const int ThumbnailDecodeWidth = 280;
+
+    // 每帧复用的变换对象，避免 60fps 下持续分配 TransformGroup/ScaleTransform/RotateTransform
+    private readonly ScaleTransform _scaleTransform = new(1.0, 1.0);
+    private readonly RotateTransform _rotateTransform = new(0, 74, 0);
+
     public readonly SpringMotion XMotion = new(response: 0.55, damping: 0.78, initial: 0.0);
     public readonly SpringMotion DropMotion = new(response: 0.42, damping: 0.72, initial: -46.0);
     public readonly SpringMotion SwingMotion = new(response: 2 * Math.PI / Math.Sqrt(46), damping: 2.6 / (2 * Math.Sqrt(46)), initial: 6.0);
@@ -77,6 +89,8 @@ public partial class ShotCard : UserControl
             ScaleMotion.Target = 1.0;
         };
 
+        RenderTransform = new TransformGroup { Children = { _scaleTransform, _rotateTransform } };
+
         SetupCardContent();
         SetupContextMenu();
     }
@@ -92,26 +106,7 @@ public partial class ShotCard : UserControl
         BadgeText.Text = badge.Text;
         BadgeText.Foreground = new SolidColorBrush(Color.Parse(badge.ForegroundColorHex));
 
-        // 判断是否为图片展示缩略图
-        if (Item.Kind == ItemKind.Image && File.Exists(Item.FilePath))
-        {
-            try
-            {
-                using var stream = File.OpenRead(Item.FilePath);
-                // 高性能按需解码缩略图，避免消耗过大显存
-                var bitmap = Bitmap.DecodeToWidth(stream, 280);
-                ThumbnailImage.Source = bitmap;
-                ImageFrame.IsVisible = true;
-                DocFrame.IsVisible = false;
-                return;
-            }
-            catch
-            {
-                // 图片解码失败则优雅回退至通用文件吊牌
-            }
-        }
-
-        // 通用文件吊牌模式
+        // 先以通用文件吊牌呈现；图片缩略图在后台线程解码完成后再切换，避免批量加载时阻塞 UI 线程
         ImageFrame.IsVisible = false;
         DocFrame.IsVisible = true;
         DocIconSymbol.Text = Item.Kind switch
@@ -124,6 +119,40 @@ public partial class ShotCard : UserControl
             ItemKind.Archive => "ZIP",
             _ => "FILE"
         };
+
+        if (Item.Kind == ItemKind.Image)
+        {
+            _ = LoadThumbnailAsync();
+        }
+    }
+
+    private async Task LoadThumbnailAsync()
+    {
+        var path = Item.FilePath;
+        Bitmap? bitmap;
+        try
+        {
+            bitmap = await Task.Run(() =>
+            {
+                if (!File.Exists(path)) return null;
+                using var stream = File.OpenRead(path);
+                // 按需解码到卡片尺寸，避免整图解码占用过多内存
+                return Bitmap.DecodeToWidth(stream, ThumbnailDecodeWidth);
+            });
+        }
+        catch
+        {
+            // 图片解码失败则保持通用文件吊牌
+            return;
+        }
+
+        if (bitmap == null) return;
+
+        var previous = ThumbnailImage.Source as Bitmap;
+        ThumbnailImage.Source = bitmap;
+        ImageFrame.IsVisible = true;
+        DocFrame.IsVisible = false;
+        if (!ReferenceEquals(previous, bitmap)) previous?.Dispose();
     }
 
     private void SetupContextMenu()
@@ -163,12 +192,16 @@ public partial class ShotCard : UserControl
         var copyItem = new MenuItem { Header = "复制文件" };
         copyItem.Click += (_, _) => CopyFileToClipboard();
 
+        var copyPathItem = new MenuItem { Header = "复制文件路径" };
+        copyPathItem.Click += async (_, _) => await CopyPathToClipboardAsync();
+
         var saveCopyItem = new MenuItem { Header = "保存副本 (另存为)..." };
         saveCopyItem.Click += async (_, _) => await SaveCopyAsAsync();
 
         menu.Items.Add(locateItem);
         menu.Items.Add(openItem);
         menu.Items.Add(copyItem);
+        menu.Items.Add(copyPathItem);
         menu.Items.Add(saveCopyItem);
 
         menu.Items.Add(new Separator());
@@ -218,16 +251,9 @@ public partial class ShotCard : UserControl
 
     public void ReloadThumbnail()
     {
-        if (Item.Kind == ItemKind.Image && File.Exists(Item.FilePath))
+        if (Item.Kind == ItemKind.Image)
         {
-            try
-            {
-                using var stream = File.OpenRead(Item.FilePath);
-                ThumbnailImage.Source = new Bitmap(stream);
-                ImageFrame.IsVisible = true;
-                DocFrame.IsVisible = false;
-            }
-            catch { }
+            _ = LoadThumbnailAsync();
         }
     }
 
@@ -259,11 +285,20 @@ public partial class ShotCard : UserControl
         }
     }
 
+    private async Task CopyPathToClipboardAsync()
+    {
+        var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+        if (clipboard == null) return;
+        await clipboard.SetTextAsync(Item.FilePath);
+        ShowToast("路径已复制");
+    }
+
     private void CopyFileToClipboard()
     {
         PlatformProvider.Current.CopyFilesToClipboard([Item.FilePath]);
         ShowToast("已复制到剪贴板");
         SwingMotion.Velocity += 4.0;
+        MotionKicked?.Invoke(this, EventArgs.Empty);
     }
 
     public void ShowToast(string message)
@@ -309,6 +344,7 @@ public partial class ShotCard : UserControl
             {
                 // 原生系统文件拖放 (Drag-Out 联动收纳篮与桌面)
                 CardSurface.Opacity = 0.55;
+                DragStarted?.Invoke(this, EventArgs.Empty);
                 try
                 {
                     var data = new DataObject();
@@ -317,6 +353,11 @@ public partial class ShotCard : UserControl
                     data.Set(Clothesline.App.Services.DragDropHelper.RopeItemIdFormat, Item.Id);
                     data.Set(Clothesline.App.Services.DragDropHelper.CardFilePathFormat, Item.FilePath);
                     await DragDrop.DoDragDrop(e, data, DragDropEffects.Copy | DragDropEffects.Move);
+                }
+                catch (Exception ex)
+                {
+                    // async void 中的异常会终止进程
+                    System.Diagnostics.Trace.WriteLine($"[Clothesline] drag failed: {ex}");
                 }
                 finally
                 {
@@ -375,7 +416,8 @@ public partial class ShotCard : UserControl
     /// <summary>
     /// 每帧更新卡片物理运动与贝塞尔锚定定位
     /// </summary>
-    public void StepPhysics(double dt, double ropeY)
+    /// <returns>卡片所有弹簧是否均已静止</returns>
+    public bool StepPhysics(double dt, double ropeY)
     {
         XMotion.Step(dt);
         DropMotion.Step(dt);
@@ -385,15 +427,11 @@ public partial class ShotCard : UserControl
         Canvas.SetLeft(this, XMotion.Position);
         Canvas.SetTop(this, ropeY + DropMotion.Position);
 
-        // 旋转轴心点在卡片顶部夹子咬合点 (74, 0)
-        var pivot = new Point(74, 0);
-        RenderTransform = new TransformGroup
-        {
-            Children =
-            {
-                new ScaleTransform(ScaleMotion.Position, ScaleMotion.Position),
-                new RotateTransform(SwingMotion.Position, pivot.X, pivot.Y)
-            }
-        };
+        // 旋转轴心点在卡片顶部夹子咬合点 (74, 0)；仅更新复用变换的数值
+        _scaleTransform.ScaleX = ScaleMotion.Position;
+        _scaleTransform.ScaleY = ScaleMotion.Position;
+        _rotateTransform.Angle = SwingMotion.Position;
+
+        return XMotion.Settled && DropMotion.Settled && SwingMotion.Settled && ScaleMotion.Settled;
     }
 }
